@@ -3,6 +3,8 @@ from STOPS import *
 from PATHS import *
 import heapq
 from pyproj import Proj, transform
+import json
+import geojson
 import random
 
 from math import radians, sin, cos, sqrt, atan2
@@ -19,17 +21,7 @@ def distance(lng1, lat1, lng2, lat2):
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     return R * c * 1000
 
-# def covertToXY(lng, lat):
-#     source_crs = Proj(init='epsg:4326')
-#     target_crs = Proj(init='epsg:3405')
-#     x, y = transform(source_crs, target_crs, lng, lat)
-#     return x, y
 
-# def distance(lng1, lat1, lng2, lat2):
-#     x1, y1 = covertToXY(lng1, lat1)
-#     x2, y2 = covertToXY(lng2, lat2)
-#     return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-topoList = []
 visited = {}
 edge = {}
 dp = {}
@@ -54,6 +46,7 @@ class Graph:
         pathQuery = PathQuery(filename3)
 
         self.numVer = set([i.getAttr('StopId') for i in stopQuery.stopList])
+        self.StopLngLat = {i.getAttr('StopId') : (i.getAttr('Lng'), i.getAttr('Lat')) for i in stopQuery.stopList}
         # self.numVer = max([i.getAttr('StopId') for i in stopQuery.stopList])
         print(len(self.numVer))
         self.dist = {}
@@ -72,7 +65,7 @@ class Graph:
             for j in self.numVer:
                 self.cnt[i][j] = 0
                 self.dist[i][j] = 10**9
-                self.trace[i][j] = (-1, [])
+                self.trace[i][j] = (-1, ())
         # self.dist = [[10**9 for i in range(self.numVer + 1)] for j in range(self.numVer + 1)]
         # self.trace = [[-1 for i in range(self.numVer + 1)] for j in range(self.numVer + 1)]
         mx = 0.0
@@ -98,20 +91,21 @@ class Graph:
                 
                 if id < len(stopList) and abs(stopList[id].getAttr('Lng') - lng) < 0.001997 and abs(stopList[id].getAttr('Lat') - lat) < 0.001997:
                     if preStopId != -1:
-                        # if totalDis < 0.1:
-                        #     totalDis = distance(prelng, prelat, stopList[id].getAttr('Lng'), stopList[id].getAttr('Lat'))
-                        #     # print(totalDis)
-                        #     total += totalDis
+                        if totalDis < 0.1:
+                            totalDis = distance(prelng, prelat, stopList[id].getAttr('Lng'), stopList[id].getAttr('Lat'))
+                            total += totalDis
 
                         self.vertices[preStopId].append(((totalDis/speed, totalDis), stopList[id].getAttr('StopId')))
-                        self.path[preStopId].append(listPath)
+                        self.path[preStopId].append((listPath, path.getAttr('RouteId'), path.getAttr('RouteVarId')))
                         listPath = [(lng, lat)]
 
                     preStopId = stopList[id].getAttr('StopId')
                     id += 1
                     totalDis = 0
+                    
                 prelng = lng
                 prelat = lat
+
             mx = max(abs(total - temp.getAttr('Distance'))/temp.getAttr('Distance')*100, mx)
             print(abs(total - temp.getAttr('Distance'))/temp.getAttr('Distance')*100)
             if id != len(stopList):
@@ -132,32 +126,48 @@ class Graph:
                 dis, u = heapq.heappop(pq)
                 if dis > self.dist[start][u]:
                     continue
-                id = 0
-                for w, v in self.vertices[u]:
+                for (w, v), pa in zip(self.vertices[u], self.path[u]):
                     if dis + w[0] < self.dist[start][v]:
                         self.cnt[start][v] = self.cnt[start][u]
                         self.dist[start][v] = dis + w[0]
-                        self.trace[start][v] = (u, self.path[u][id])
+                        self.trace[start][v] = (u, pa)
                         heapq.heappush(pq, (dis + w[0], v))
                     elif dis + w[0] == self.dist[start][v]:
                         self.cnt[start][v] += self.cnt[start][u]
-                    id += 1
 
     def findShortestPath(self, filename, startStop, endStop):
-        with open(filename, 'w') as file:
-            path = []
-            u = endStop
-            while(u != -1):
-                path.append(u)
-                u = self.trace[startStop][u][0]
-            path.reverse()
-            file.write(f'{startStop} -> {endStop}: {self.dist[startStop][endStop]}\n')
-            file.write(f'{path}\n')
+        pass
+        shortestPath = {'StartStopId': startStop, 'EndStopId': endStop, 'distance' : 0, 'runningTime' : self.dist[startStop][endStop],'StopIds': [], 'Paths': []}
+        feature = []
+
+        u = endStop
+        while u != -1:
+            temp = self.trace[startStop][u]
+            shortestPath['StopIds'].append(u)
+            feature.append(Feature(geometry={"type": "Point", "coordinates": [self.StopLngLat[u][0], self.StopLngLat[u][1]]}, properties={"StopId": u}))
+       
+            if u != startStop:
+                shortestPath['Paths'].append({'lat': [lat[1] for lat in temp[1][0]], 'lng': [lng[0] for lng in temp[1][0]], 'RouteId': temp[1][1], 'RouteVarId': temp[1][2]})
+                feature.append(Feature(geometry={"type": "LineString", "coordinates": temp[1][0]}, properties={"RouteId": temp[1][1], "RouteVarId": temp[1][2]}))
+             
+            u = temp[0]
+
+        shortestPath['StopIds'] = shortestPath['StopIds'][::-1]
+        shortestPath['Paths'] = shortestPath['Paths'][::-1]
+
+        with open(filename + '.json', 'w') as file:
+            file.write(json.dumps(shortestPath, separators=(', ', ' : ')))
+
+        with open(filename + '.geojson', 'w') as file:
+            feature_collection = FeatureCollection(feature)
+            dump(feature_collection, file)
+
+        
+
 
     def counImStops(self):
         
         global visited
-        global topoList
         global edge
         global dp
         
