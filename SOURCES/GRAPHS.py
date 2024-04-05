@@ -2,25 +2,13 @@ from VARS import *
 from STOPS import *
 from PATHS import *
 import heapq
-from pyproj import Proj, transform
+from pyproj import Proj, Transformer
 import json
 import geojson
 import random
+from shapely.geometry import Point, LineString
 
 from math import radians, sin, cos, sqrt, atan2
-
-def distance(lng1, lat1, lng2, lat2):
-    R = 6371.0
-    lat1 = radians(lat1)
-    lng1 = radians(lng1)
-    lat2 = radians(lat2)
-    lng2 = radians(lng2)
-    dlng = lng2 - lng1
-    dlat = lat2 - lat1
-    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlng / 2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c * 1000
-
 
 visited = {}
 edge = {}
@@ -44,10 +32,18 @@ class Graph:
         stopQuery = StopQuery(filename1)
         routeVarQuery = RouteVarQuery(filename2)
         pathQuery = PathQuery(filename3)
+        # pathQuery.pathList = pathQuery.searchBy(RouteId = '128', RouteVarId = '256')
+
+        #inti pyproj
+        inProj = Proj(init='epsg:4326')
+        outProj = Proj(init='epsg:32648')
+        self.trans = Transformer.from_proj(inProj, outProj, always_xy=True)
+        self.retrans = Transformer.from_proj(outProj, inProj, always_xy=True)
 
         self.numVer = set([i.getAttr('StopId') for i in stopQuery.stopList])
         self.StopLngLat = {i.getAttr('StopId') : (i.getAttr('Lng'), i.getAttr('Lat')) for i in stopQuery.stopList}
-        # self.numVer = max([i.getAttr('StopId') for i in stopQuery.stopList])
+        
+        
         print(len(self.numVer))
         self.dist = {}
         self.trace = {}
@@ -66,55 +62,63 @@ class Graph:
                 self.cnt[i][j] = 0
                 self.dist[i][j] = 10**9
                 self.trace[i][j] = (-1, ())
-        # self.dist = [[10**9 for i in range(self.numVer + 1)] for j in range(self.numVer + 1)]
-        # self.trace = [[-1 for i in range(self.numVer + 1)] for j in range(self.numVer + 1)]
-        mx = 0.0
+        mx = 0
         for path in pathQuery.pathList:
+            total = 0
+            self.linePath = [(x, y) for x, y in zip(path.getAttr('lng'), path.getAttr('lat'))]
+            
+            self.GeolinePath = LineString([(self.trans.transform(x, y)) for x, y in self.linePath])
+
             stopList = stopQuery.searchBy(RouteId = path.getAttr('RouteId'), RouteVarId = path.getAttr('RouteVarId'))
             
             temp = routeVarQuery.searchBy(RouteId = path.getAttr('RouteId'), RouteVarId = path.getAttr('RouteVarId'))[0]
             speed = temp.getAttr('Distance') / (temp.getAttr('RunningTime') * 60)
-            
-            prelng = -1
-            prelat = -1
-            preStopId = -1
-            totalDis = 0
+            prestop = None
             id = 0
-            total = 0
-            listPath = []
-            
-            for lng, lat in zip(path.getAttr('lng'), path.getAttr('lat')):
-                if prelng != -1:
-                    totalDis += distance(prelng, prelat, lng, lat)
-                    total  += distance(prelng, prelat, lng, lat)
-                listPath.append((lng, lat))
-                
-                if id < len(stopList) and abs(stopList[id].getAttr('Lng') - lng) < 0.001997 and abs(stopList[id].getAttr('Lat') - lat) < 0.001997:
-                    if preStopId != -1:
-                        if totalDis < 0.1:
-                            totalDis = distance(prelng, prelat, stopList[id].getAttr('Lng'), stopList[id].getAttr('Lat'))
-                            total += totalDis
+            preid = 0
+            for stop in stopList:
+                lng, lat = stop.getAttr('Lng'), stop.getAttr('Lat')
+                Dist = 0
+                preid = id
+                id = self.findNearestPoint(lng, lat, id)
 
-                        self.vertices[preStopId].append(((totalDis/speed, totalDis), stopList[id].getAttr('StopId')))
-                        self.path[preStopId].append((listPath, path.getAttr('RouteId'), path.getAttr('RouteVarId')))
-                        listPath = [(lng, lat)]
+                for i in range(preid, id):
+                    Dist += self.distance(self.linePath[i][0], self.linePath[i][1], self.linePath[i + 1][0], self.linePath[i + 1][1])
 
-                    preStopId = stopList[id].getAttr('StopId')
-                    id += 1
-                    totalDis = 0
-                    
-                prelng = lng
-                prelat = lat
+                total += Dist
+                if Dist < 0.1 and prestop != None:
+                    print('ERROR')
+                    print(prestop, stop.getAttr('StopId'), path.getAttr('RouteId'), path.getAttr('RouteVarId'))
+                    Dist = self.distance(self.StopLngLat[prestop][0], self.StopLngLat[prestop][1], lng, lat)
+                    print(Dist)
 
-            mx = max(abs(total - temp.getAttr('Distance'))/temp.getAttr('Distance')*100, mx)
-            print(abs(total - temp.getAttr('Distance'))/temp.getAttr('Distance')*100)
-            if id != len(stopList):
-                print('ERROR')
-                print(path.getAttr('RouteId'), path.getAttr('RouteVarId'))
-                print(id)
-                print(len(stopList))
-            # print(totalDis)
-        print('max',mx)   
+                if prestop != None:
+                    self.vertices[prestop].append(((Dist / speed, Dist), stop.getAttr('StopId')))
+                    self.path[prestop].append((self.linePath[preid: id + 1], path.getAttr('RouteId'), path.getAttr('RouteVarId')))
+                    self.path[prestop][-1][0].append((lng, lat))
+
+                prestop = stop.getAttr('StopId') 
+
+            print((total - temp.getAttr('Distance')) / temp.getAttr('Distance')*100)
+            mx = max(mx, abs(total - temp.getAttr('Distance')) / temp.getAttr('Distance')*100)
+        print(mx, id, total)
+
+
+    def distance(self, lng1, lat1, lng2, lat2):
+        x1, y1 = self.trans.transform(lng1, lat1)
+        x2, y2 = self.trans.transform(lng2, lat2)
+        return sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+    
+    def findNearestPoint(self, lng, lat, id):
+        minDist = 10**9
+        res = None
+        for i in range(id, len(self.linePath)):
+            curDist = self.distance(lng, lat, self.linePath[i][0], self.linePath[i][1])
+            if curDist < minDist:
+                minDist = curDist
+                res = i
+        return res
+        
 
     def dijkstra(self):
         for start in self.numVer:
@@ -194,26 +198,7 @@ class Graph:
                     dfs(i)
 
             for i in self.numVer:
-                self.count[i] += self.cnt[start][i] * dp[i]
-
-
-        # kk = [1115, 1239, 1152, 1393, 606, 603, 732, 271, 272, 174, 166, 35, 510, 1235, 1234, 1233, 169, 1155, 725, 440]
-        # for u in kk:
-        #     #u = random.choice(list(self.numVer))
-        #     dem = 0
-        #     for st in self.numVer:
-        #         for v in self.numVer:
-        #             if abs(self.dist[st][v] - self.dist[st][u] - self.dist[u][v]) <= 0.002:
-        #                 dem += self.cnt[st][u]  * self.cnt[u][v]
-        #     if dem != self.count[u]:
-        #         print('ERROR')
-        #         print(u)    
-        #         print(dem)
-        #         print(self.count[u])
-        #         break
-        #     else :
-        #         print('OK')
-        #         print(dem)
+                self.count[i] +=  dp[i]
 
         ldk = []
 
